@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Yahoo Finance Ultra Conservative Screener — shard runner (v2, now/y1/y2 only)
+Yahoo Finance Ultra Conservative Screener — shard runner (v2, now/y1/y2 + Annual fallback)
 - 입력: --tickers_csv, --shard_idx, --num_shards, --out_csv, --resume
 - 출력: 샤드별 CSV (raw metrics + now/y1/y2 TTM 스냅샷)
+- Annual(연간) 백업: TTM이 NaN일 때 같은 항목의 Annual 최신값(해당 시점 이전/동일)을 사용
 
 수집/계산 컬럼:
 - price_[now|y1|y2]
@@ -37,6 +38,7 @@ SNAP_OFFSETS = {
 }
 
 def nearest_trading_close(tkr: yf.Ticker, target_date):
+    """target_date 전후 ±20일에서 가장 가까운 거래일 종가."""
     start = (target_date - timedelta(days=20)).strftime(DATE_FMT)
     end   = (target_date + timedelta(days=20)).strftime(DATE_FMT)
     hist = tkr.history(start=start, end=end, auto_adjust=False)
@@ -49,6 +51,7 @@ def nearest_trading_close(tkr: yf.Ticker, target_date):
     return float(row["Close"].iloc[0]) if len(row) > 0 else np.nan
 
 def _latest_on_or_before(df: pd.DataFrame, cutoff_ts: pd.Timestamp):
+    """df.index(DatetimeIndex)에서 cutoff_ts 이하 최신 인덱스 반환."""
     if df is None or df.empty:
         return None
     idx = df.index[df.index <= cutoff_ts]
@@ -57,6 +60,7 @@ def _latest_on_or_before(df: pd.DataFrame, cutoff_ts: pd.Timestamp):
     return idx.max()
 
 def ttm_sum(df: pd.DataFrame, col: str, asof_date):
+    """asof_date 기준 최근 4개 분기 합(=TTM). 없으면 NaN."""
     if df is None or df.empty or (col not in df.columns):
         return np.nan
     df = df.copy().sort_index()
@@ -70,6 +74,8 @@ def ttm_sum(df: pd.DataFrame, col: str, asof_date):
     return float(pd.to_numeric(window[col], errors="coerce").dropna().sum()) if len(window) > 0 else np.nan
 
 def build_ttm_snapshots(tkr: yf.Ticker):
+    """분기/연간 재무 로드, TTM 람다 + Annual 백업 도우미 반환."""
+    # 분기 재무(행=분기)
     q_is = tkr.quarterly_financials.T
     q_bs = tkr.quarterly_balance_sheet.T
     q_cf = tkr.quarterly_cashflow.T
@@ -77,6 +83,15 @@ def build_ttm_snapshots(tkr: yf.Ticker):
         if df is not None and not df.empty:
             df.index = pd.to_datetime(df.index)
 
+    # [추가] 연간 재무(행=연간) — TTM이 비면 백업으로 사용
+    a_is = tkr.financials.T
+    a_bs = tkr.balance_sheet.T
+    a_cf = tkr.cashflow.T
+    for df_annual in (a_is, a_bs, a_cf):
+        if df_annual is not None and not df_annual.empty:
+            df_annual.index = pd.to_datetime(df_annual.index)
+
+    # 필드 키 후보(티커별 라벨 차이 대응)
     KEYS = {
         "net_income": ["Net Income", "NetIncome", "Net Income Common Stockholders"],
         "ebitda": ["EBITDA"],
@@ -92,13 +107,13 @@ def build_ttm_snapshots(tkr: yf.Ticker):
             if n in df.columns: return n
         return None
 
-    ni_col     = pick(q_is, KEYS["net_income"])
-    ebitda_col = pick(q_is, KEYS["ebitda"])
-    debt_col   = pick(q_bs, KEYS["total_debt"])
-    cash_col   = pick(q_bs, KEYS["cash"])
-    equity_col = pick(q_bs, KEYS["equity"])
-    ocf_col    = pick(q_cf, KEYS["ocf"])
-    capex_col  = pick(q_cf, KEYS["capex"])
+    ni_col     = pick(q_is, KEYS["net_income"]) or pick(a_is, KEYS["net_income"])
+    ebitda_col = pick(q_is, KEYS["ebitda"]) or pick(a_is, KEYS["ebitda"])
+    debt_col   = pick(q_bs, KEYS["total_debt"]) or pick(a_bs, KEYS["total_debt"])
+    cash_col   = pick(q_bs, KEYS["cash"]) or pick(a_bs, KEYS["cash"])
+    equity_col = pick(q_bs, KEYS["equity"]) or pick(a_bs, KEYS["equity"])
+    ocf_col    = pick(q_cf, KEYS["ocf"]) or pick(a_cf, KEYS["ocf"])
+    capex_col  = pick(q_cf, KEYS["capex"]) or pick(a_cf, KEYS["capex"])
 
     def latest_val(df, col, asof_date):
         if df is None or df.empty or not col: return np.nan
@@ -107,41 +122,72 @@ def build_ttm_snapshots(tkr: yf.Ticker):
         if last_idx is None: return np.nan
         return pd.to_numeric(df.loc[last_idx, col], errors="coerce")
 
+    def latest_annual(df, col, asof_date):
+        """asof_date 이전/동일 최신 연간값(백업)"""
+        if df is None or df.empty or not col: return np.nan
+        cutoff = pd.Timestamp(asof_date)
+        idx = df.index[df.index <= cutoff]
+        if len(idx) == 0: return np.nan
+        return pd.to_numeric(df.loc[idx.max(), col], errors="coerce")
+
     return {
-        "NI_TTM":     lambda d: ttm_sum(q_is, ni_col, d) if ni_col else np.nan,
-        "EBITDA_TTM": lambda d: ttm_sum(q_is, ebitda_col, d) if ebitda_col else np.nan,
-        "Debt":       lambda d: latest_val(q_bs, debt_col, d),
-        "Cash":       lambda d: latest_val(q_bs, cash_col, d),
-        "Equity":     lambda d: latest_val(q_bs, equity_col, d),
-        "OCF_TTM":    lambda d: ttm_sum(q_cf, ocf_col, d) if ocf_col else np.nan,
-        "Capex_TTM":  lambda d: ttm_sum(q_cf, capex_col, d) if capex_col else np.nan,
+        "NI_TTM":      lambda d: ttm_sum(q_is, ni_col, d) if ni_col else np.nan,
+        "EBITDA_TTM":  lambda d: ttm_sum(q_is, ebitda_col, d) if ebitda_col else np.nan,
+        "Debt":        lambda d: (latest_val(q_bs, debt_col, d) if debt_col else np.nan),
+        "Cash":        lambda d: (latest_val(q_bs, cash_col, d) if cash_col else np.nan),
+        "Equity":      lambda d: (latest_val(q_bs, equity_col, d) if equity_col else np.nan),
+        "OCF_TTM":     lambda d: ttm_sum(q_cf, ocf_col, d) if ocf_col else np.nan,
+        "Capex_TTM":   lambda d: ttm_sum(q_cf, capex_col, d) if capex_col else np.nan,
+
+        # Annual 백업용 참조들
+        "_annual_refs": {
+            "a_is": a_is, "a_bs": a_bs, "a_cf": a_cf,
+            "ni_col": ni_col, "ebitda_col": ebitda_col,
+            "ocf_col": ocf_col, "capex_col": capex_col,
+            "latest_annual": latest_annual,
+        }
     }
 
 def compute_snapshots_for_ticker(ticker: str):
     try:
         tkr = yf.Ticker(ticker)
+
+        # shares 보강: info → fast_info.shares 순으로 시도
         info = tkr.get_info() or {}
         shares = info.get("sharesOutstanding") or np.nan
         if not shares or shares != shares:
-            shares = np.nan
+            try:
+                fi = getattr(tkr, "fast_info", None)
+                if fi and isinstance(fi, dict):
+                    shares = fi.get("shares", np.nan)
+            except Exception:
+                pass
 
         snaps = {}
-        ttm_funcs = build_ttm_snapshots(tkr)
+        ttm = build_ttm_snapshots(tkr)
+        A   = ttm["_annual_refs"]
+        a_is, a_cf = A["a_is"], A["a_cf"]
+        LA  = A["latest_annual"]
+        ni_col, ebitda_col = A["ni_col"], A["ebitda_col"]
+        ocf_col, capex_col = A["ocf_col"], A["capex_col"]
 
         for tag, days in SNAP_OFFSETS.items():
             d = TODAY - timedelta(days=days)
             p = nearest_trading_close(tkr, d)
             snaps[f"price_{tag}"] = p
 
-            NI      = ttm_funcs["NI_TTM"](d)
-            EBITDA  = ttm_funcs["EBITDA_TTM"](d)
-            Debt    = ttm_funcs["Debt"](d)
-            Cash    = ttm_funcs["Cash"](d)
-            Equity  = ttm_funcs["Equity"](d)
-            OCF     = ttm_funcs["OCF_TTM"](d)
-            Capex   = ttm_funcs["Capex_TTM"](d)
+            # TTM → NaN이면 Annual 최신값으로 백업
+            NI      = ttm["NI_TTM"](d);      NI      = NI      if NI==NI      else LA(a_is, ni_col, d)
+            EBITDA  = ttm["EBITDA_TTM"](d);  EBITDA  = EBITDA  if EBITDA==EBITDA else LA(a_is, ebitda_col, d)
+            OCF     = ttm["OCF_TTM"](d);     OCF     = OCF     if OCF==OCF     else LA(a_cf, ocf_col, d)
+            Capex   = ttm["Capex_TTM"](d);   Capex   = Capex   if Capex==Capex else LA(a_cf, capex_col, d)
+
+            Debt    = ttm["Debt"](d)
+            Cash    = ttm["Cash"](d)
+            Equity  = ttm["Equity"](d)
 
             FCF = (OCF - Capex) if (not math.isnan(OCF) and not math.isnan(Capex)) else np.nan
+
             mktcap = (p * shares) if (shares == shares and p == p) else np.nan
             EV = (mktcap + (0 if math.isnan(Debt) else Debt) - (0 if math.isnan(Cash) else Cash)) if mktcap == mktcap else np.nan
 
@@ -197,6 +243,7 @@ def main():
     tickers = pd.read_csv(args.tickers_csv)["ticker"].dropna().astype(str).tolist()
     tickers = [t.strip().upper() for t in tickers if t.strip()]
 
+    # 샤딩
     shard = [t for i, t in enumerate(tickers) if (i % args.num_shards) == args.shard_idx]
 
     out_path = args.out_csv
