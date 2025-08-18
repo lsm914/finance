@@ -214,6 +214,10 @@ def compute_snapshots_for_ticker(ticker: str):
                 f"FCF_Yield_{tag}": FCF_Yield,
             })
 
+         # 🔹[추가] 루프 밖에서 한 번만 기록
+        snaps["sector"] = sector
+        snaps["industry"] = industry
+
         # 변화율: now vs y1, y1 vs y2
         def ratio(a, b):
             if a != a or b != b or b == 0: return np.nan
