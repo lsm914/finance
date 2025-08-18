@@ -1,16 +1,21 @@
 name: Update Nasdaq Tickers
 
 on:
-  workflow_dispatch:   # 수동 실행
+  workflow_dispatch: {}
   schedule:
-    - cron: "30 15 * * 0"
+    - cron: "30 15 * * 0"   # 예: 월 00:30 KST
+
+permissions:
+  contents: write   # ← 중요: GITHUB_TOKEN에 쓰기 권한 부여
 
 jobs:
   update-tickers:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # push하려면 히스토리 필요
+          persist-credentials: true  # 기본 GITHUB_TOKEN 사용
 
       - name: Download nasdaq tickers
         run: |
@@ -23,8 +28,9 @@ jobs:
 
       - name: Commit & push updated tickers
         run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/nasdaq_tickers.csv
-          git commit -m "chore: update nasdaq tickers [skip ci]" || echo "No changes"
-          git push
+          git commit -m "chore: update nasdaq tickers [skip ci]" || exit 0
+          # 현재 브랜치로 푸시
+          git push origin HEAD:${{ github.ref_name }}
