@@ -45,7 +45,11 @@ def main():
     drop_pat = df.columns.str.contains(r'(_y3$)|(_chg_2_3y$)')
     if drop_pat.any():
         df = df.loc[:, ~drop_pat]
-
+    # 🔒 sector/industry 보존 + 맨 앞으로 이동
+    front = [c for c in ['ticker', 'sector', 'industry'] if c in df.columns]
+    others = [c for c in df.columns if c not in front]
+    df = df[front + others]
+    
     # 1) 저평가 지수
     uv = safe_mean([
         pctrank_col(df, "PE_TTM_now", invert=True),
