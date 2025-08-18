@@ -66,4 +66,44 @@ def main():
         df = df.loc[:, ~drop_pat]
 
     # sector/industry 앞으로
-    front = [c for c in ["ticker","sector","in]()]()
+    front = [c for c in ["ticker","sector","industry"] if c in df.columns]
+    others = [c for c in df.columns if c not in front]
+    df = df[front + others]
+
+    # ===== 지수 계산 =====
+    uv = safe_mean([
+        pctrank_col(df, "PE_TTM_now", invert=True),
+        pctrank_col(df, "PB_TTM_now", invert=True),
+        pctrank_col(df, "EV_EBITDA_TTM_now", invert=True),
+        pctrank_col(df, "FCF_Yield_now"),
+    ])
+    df["UndervaluationIndex"] = to_100(uv.fillna(0))
+
+    w0, w1 = 0.7, 0.3
+    def g2(prefix):
+        a = pctrank_col(df, f"{prefix}_chg_0_1y")
+        b = pctrank_col(df, f"{prefix}_chg_1_2y")
+        return (a.fillna(0)*w0 + b.fillna(0)*w1)
+
+    g_price   = g2("price")
+    g_mcap    = g2("mktCap")
+    g_ebitda  = g2("EBITDA_TTM")
+    df["GrowthIndex"] = to_100(safe_mean([g_price, g_mcap, g_ebitda]).fillna(0))
+
+    a_level = pctrank_col(df, "FCF_Yield_now").fillna(0)
+    f0 = get_series(df, "FCF_TTM_chg_0_1y")
+    f1 = get_series(df, "FCF_TTM_chg_1_2y")
+    pos_ratio = ((f0 > 0).astype(int) + (f1 > 0).astype(int)) / 2.0
+    vol = pd.concat([f0.abs(), f1.abs()], axis=1).std(axis=1)
+    vol_pen = vol.rank(pct=True, method="max").fillna(0)
+    cash_safe = (a_level*0.6 + pos_ratio.fillna(0)*0.3 - vol_pen*0.1)
+    df["CashSafetyIndex"] = to_100(cash_safe.fillna(0))
+
+    sort_cols = [c for c in ["UndervaluationIndex","CashSafetyIndex","GrowthIndex"] if c in df.columns]
+    if sort_cols:
+        df = df.sort_values(sort_cols, ascending=False)
+
+    df.to_csv(args.out_all, index=False)
+
+if __name__ == "__main__":
+    main()
