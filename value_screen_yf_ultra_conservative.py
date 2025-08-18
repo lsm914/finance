@@ -1,25 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Yahoo Finance Ultra Conservative Screener — shard runner (v2, now/y1/y2 + Annual fallback)
-- 입력: --tickers_csv, --shard_idx, --num_shards, --out_csv, --resume
-- 출력: 샤드별 CSV (raw metrics + now/y1/y2 TTM 스냅샷)
-- Annual(연간) 백업: TTM이 NaN일 때 같은 항목의 Annual 최신값(해당 시점 이전/동일)을 사용
+Yahoo Finance Ultra Conservative Screener — shard runner
+(now/y1/y2 + Annual fallback + fixed CSV schema)
 
-수집/계산 컬럼:
-- price_[now|y1|y2]
-- shares_outstanding (현재)
-- mktCap_[now|y1|y2] = price * shares_outstanding
-- EV_[now|y1|y2] = mktCap + totalDebt - cash
-- PE_TTM_[now|y1|y2] = price / EPS_TTM
-- PB_TTM_[now|y1|y2] = price / BVPS_TTM
-- EBITDA_TTM_[now|y1|y2]
-- EV_EBITDA_TTM_[now|y1|y2] = EV / EBITDA_TTM
-- FCF_TTM_[now|y1|y2] = OCF_TTM - Capex_TTM
-- FCF_Yield_[now|y1|y2] = FCF_TTM / EV
-
-분절 변화율:
-- *_chg_0_1y (now vs y1), *_chg_1_2y (y1 vs y2)
+- 입력: --tickers_csv, --shard_idx, --num_shards, --out_csv, [--resume]
+- 출력: artifacts/shard_*.csv (항상 동일한 열 순서/스키마)
 """
 
 import os, math, argparse
@@ -31,14 +17,26 @@ import yfinance as yf
 DATE_FMT = "%Y-%m-%d"
 TODAY = datetime.utcnow().date()
 
-SNAP_OFFSETS = {
-    "now": 0,
-    "y1": 365,
-    "y2": 365*2,
-}
+SNAP_OFFSETS = {"now": 0, "y1": 365, "y2": 365*2}
+
+# ===== 고정 스키마(열 순서) =====
+SCHEMA = (
+    ["ticker", "sector", "industry", "shares_outstanding"] +
+    [f"price_{t}" for t in ["now","y1","y2"]] +
+    [f"mktCap_{t}" for t in ["now","y1","y2"]] +
+    [f"EV_{t}" for t in ["now","y1","y2"]] +
+    [f"PE_TTM_{t}" for t in ["now","y1","y2"]] +
+    [f"PB_TTM_{t}" for t in ["now","y1","y2"]] +
+    [f"EBITDA_TTM_{t}" for t in ["now","y1","y2"]] +
+    [f"EV_EBITDA_TTM_{t}" for t in ["now","y1","y2"]] +
+    [f"FCF_TTM_{t}" for t in ["now","y1","y2"]] +
+    [f"FCF_Yield_{t}" for t in ["now","y1","y2"]] +
+    [f"{m}_chg_0_1y" for m in ["price","mktCap","PE_TTM","PB_TTM","EV_EBITDA_TTM","EV","FCF_TTM","FCF_Yield"]] +
+    [f"{m}_chg_1_2y" for m in ["price","mktCap","PE_TTM","PB_TTM","EV_EBITDA_TTM","EV","FCF_TTM","FCF_Yield"]] +
+    ["error"]
+)
 
 def nearest_trading_close(tkr: yf.Ticker, target_date):
-    """target_date 전후 ±20일에서 가장 가까운 거래일 종가."""
     start = (target_date - timedelta(days=20)).strftime(DATE_FMT)
     end   = (target_date + timedelta(days=20)).strftime(DATE_FMT)
     hist = tkr.history(start=start, end=end, auto_adjust=False)
@@ -51,7 +49,6 @@ def nearest_trading_close(tkr: yf.Ticker, target_date):
     return float(row["Close"].iloc[0]) if len(row) > 0 else np.nan
 
 def _latest_on_or_before(df: pd.DataFrame, cutoff_ts: pd.Timestamp):
-    """df.index(DatetimeIndex)에서 cutoff_ts 이하 최신 인덱스 반환."""
     if df is None or df.empty:
         return None
     idx = df.index[df.index <= cutoff_ts]
@@ -60,7 +57,6 @@ def _latest_on_or_before(df: pd.DataFrame, cutoff_ts: pd.Timestamp):
     return idx.max()
 
 def ttm_sum(df: pd.DataFrame, col: str, asof_date):
-    """asof_date 기준 최근 4개 분기 합(=TTM). 없으면 NaN."""
     if df is None or df.empty or (col not in df.columns):
         return np.nan
     df = df.copy().sort_index()
@@ -74,32 +70,29 @@ def ttm_sum(df: pd.DataFrame, col: str, asof_date):
     return float(pd.to_numeric(window[col], errors="coerce").dropna().sum()) if len(window) > 0 else np.nan
 
 def build_ttm_snapshots(tkr: yf.Ticker):
-    """분기/연간 재무 로드, TTM 람다 + Annual 백업 도우미 반환."""
-    # 분기 재무(행=분기)
+    # 분기
     q_is = tkr.quarterly_financials.T
     q_bs = tkr.quarterly_balance_sheet.T
     q_cf = tkr.quarterly_cashflow.T
     for df in (q_is, q_bs, q_cf):
         if df is not None and not df.empty:
             df.index = pd.to_datetime(df.index)
-
-    # [추가] 연간 재무(행=연간) — TTM이 비면 백업으로 사용
+    # 연간(백업)
     a_is = tkr.financials.T
     a_bs = tkr.balance_sheet.T
     a_cf = tkr.cashflow.T
-    for df_annual in (a_is, a_bs, a_cf):
-        if df_annual is not None and not df_annual.empty:
-            df_annual.index = pd.to_datetime(df_annual.index)
+    for df in (a_is, a_bs, a_cf):
+        if df is not None and not df.empty:
+            df.index = pd.to_datetime(df.index)
 
-    # 필드 키 후보(티커별 라벨 차이 대응)
     KEYS = {
-        "net_income": ["Net Income", "NetIncome", "Net Income Common Stockholders"],
+        "net_income": ["Net Income","NetIncome","Net Income Common Stockholders"],
         "ebitda": ["EBITDA"],
-        "total_debt": ["Total Debt", "TotalDebt"],
-        "cash": ["Cash And Cash Equivalents", "Cash And Cash Equivalents Including Restricted Cash", "Cash"],
-        "equity": ["Total Stockholder Equity", "Total Stockholders' Equity", "Total Equity Gross Minority Interest"],
-        "ocf": ["Operating Cash Flow", "Total Cash From Operating Activities"],
-        "capex": ["Capital Expenditure", "Capital Expenditures"],
+        "total_debt": ["Total Debt","TotalDebt"],
+        "cash": ["Cash And Cash Equivalents","Cash And Cash Equivalents Including Restricted Cash","Cash"],
+        "equity": ["Total Stockholder Equity","Total Stockholders' Equity","Total Equity Gross Minority Interest"],
+        "ocf": ["Operating Cash Flow","Total Cash From Operating Activities"],
+        "capex": ["Capital Expenditure","Capital Expenditures"],
     }
     def pick(df, names):
         if df is None or df.empty: return None
@@ -123,7 +116,6 @@ def build_ttm_snapshots(tkr: yf.Ticker):
         return pd.to_numeric(df.loc[last_idx, col], errors="coerce")
 
     def latest_annual(df, col, asof_date):
-        """asof_date 이전/동일 최신 연간값(백업)"""
         if df is None or df.empty or not col: return np.nan
         cutoff = pd.Timestamp(asof_date)
         idx = df.index[df.index <= cutoff]
@@ -138,10 +130,8 @@ def build_ttm_snapshots(tkr: yf.Ticker):
         "Equity":      lambda d: (latest_val(q_bs, equity_col, d) if equity_col else np.nan),
         "OCF_TTM":     lambda d: ttm_sum(q_cf, ocf_col, d) if ocf_col else np.nan,
         "Capex_TTM":   lambda d: ttm_sum(q_cf, capex_col, d) if capex_col else np.nan,
-
-        # Annual 백업용 참조들
         "_annual_refs": {
-            "a_is": a_is, "a_bs": a_bs, "a_cf": a_cf,
+            "a_is": a_is, "a_cf": a_cf,
             "ni_col": ni_col, "ebitda_col": ebitda_col,
             "ocf_col": ocf_col, "capex_col": capex_col,
             "latest_annual": latest_annual,
@@ -151,9 +141,9 @@ def build_ttm_snapshots(tkr: yf.Ticker):
 def compute_snapshots_for_ticker(ticker: str):
     try:
         tkr = yf.Ticker(ticker)
-
-        # shares 보강: info → fast_info.shares 순으로 시도
         info = tkr.get_info() or {}
+
+        # shares 보강
         shares = info.get("sharesOutstanding") or np.nan
         if not shares or shares != shares:
             try:
@@ -162,8 +152,9 @@ def compute_snapshots_for_ticker(ticker: str):
                     shares = fi.get("shares", np.nan)
             except Exception:
                 pass
-                
-        sector  = info.get("sector") or np.nan
+
+        # sector/industry
+        sector   = info.get("sector") or np.nan
         industry = info.get("industry") or info.get("industryDisp") or np.nan
 
         snaps = {}
@@ -179,7 +170,6 @@ def compute_snapshots_for_ticker(ticker: str):
             p = nearest_trading_close(tkr, d)
             snaps[f"price_{tag}"] = p
 
-            # TTM → NaN이면 Annual 최신값으로 백업
             NI      = ttm["NI_TTM"](d);      NI      = NI      if NI==NI      else LA(a_is, ni_col, d)
             EBITDA  = ttm["EBITDA_TTM"](d);  EBITDA  = EBITDA  if EBITDA==EBITDA else LA(a_is, ebitda_col, d)
             OCF     = ttm["OCF_TTM"](d);     OCF     = OCF     if OCF==OCF     else LA(a_cf, ocf_col, d)
@@ -190,7 +180,6 @@ def compute_snapshots_for_ticker(ticker: str):
             Equity  = ttm["Equity"](d)
 
             FCF = (OCF - Capex) if (not math.isnan(OCF) and not math.isnan(Capex)) else np.nan
-
             mktcap = (p * shares) if (shares == shares and p == p) else np.nan
             EV = (mktcap + (0 if math.isnan(Debt) else Debt) - (0 if math.isnan(Cash) else Cash)) if mktcap == mktcap else np.nan
 
@@ -214,17 +203,13 @@ def compute_snapshots_for_ticker(ticker: str):
                 f"FCF_Yield_{tag}": FCF_Yield,
             })
 
-         # 🔹[추가] 루프 밖에서 한 번만 기록
-        snaps["sector"] = sector
-        snaps["industry"] = industry
-
-        # 변화율: now vs y1, y1 vs y2
+        # 변화율 (now vs y1, y1 vs y2)
         def ratio(a, b):
             if a != a or b != b or b == 0: return np.nan
             return (a / b) - 1.0
 
         seg = {}
-        for metric in ["price", "mktCap", "PE_TTM", "PB_TTM", "EV_EBITDA_TTM", "EV", "FCF_TTM", "FCF_Yield"]:
+        for metric in ["price","mktCap","PE_TTM","PB_TTM","EV_EBITDA_TTM","EV","FCF_TTM","FCF_Yield"]:
             now = snaps.get(f"{metric}_now", np.nan)
             y1  = snaps.get(f"{metric}_y1",  np.nan)
             y2  = snaps.get(f"{metric}_y2",  np.nan)
@@ -232,11 +217,14 @@ def compute_snapshots_for_ticker(ticker: str):
             seg[f"{metric}_chg_1_2y"] = ratio(y1, y2)
         snaps.update(seg)
 
+        # 루프 밖 메타
         snaps["ticker"] = ticker
+        snaps["sector"] = sector
+        snaps["industry"] = industry
         return snaps
 
     except Exception as e:
-        return {"ticker": ticker, "error": str(e)}
+        return {"ticker": ticker, "error": str(e).replace(",", ";")}
 
 def main():
     ap = argparse.ArgumentParser()
@@ -247,10 +235,12 @@ def main():
     ap.add_argument("--resume", action="store_true")
     args = ap.parse_args()
 
-    tickers = pd.read_csv(args.tickers_csv)["ticker"].dropna().astype(str).tolist()
-    tickers = [t.strip().upper() for t in tickers if t.strip()]
+    # 헤더 유무 자동 처리
+    df_t = pd.read_csv(args.tickers_csv)
+    if 'ticker' not in df_t.columns:
+        df_t = pd.read_csv(args.tickers_csv, header=None, names=['ticker'])
+    tickers = [t.strip().upper() for t in df_t['ticker'].dropna().astype(str).tolist() if t.strip()]
 
-    # 샤딩
     shard = [t for i, t in enumerate(tickers) if (i % args.num_shards) == args.shard_idx]
 
     out_path = args.out_csv
@@ -267,8 +257,15 @@ def main():
         nonlocal rows
         if not rows: return
         df = pd.DataFrame(rows)
+        # 누락 칼럼 보강 + 스키마 순서로 고정
+        for c in SCHEMA:
+            if c not in df.columns:
+                df[c] = np.nan
+        df = df.reindex(columns=SCHEMA)
         header_needed = not os.path.exists(out_path)
-        df.to_csv(out_path, index=False, mode=("a" if not header_needed else "w"), header=header_needed)
+        df.to_csv(out_path, index=False,
+                  mode=("w" if header_needed else "a"),
+                  header=header_needed)
         rows = []
 
     for t in shard:
