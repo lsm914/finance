@@ -1,10 +1,9 @@
 name: YF Ultra Conservative Screener v2
 
 on:
-  workflow_dispatch: {}
-  schedule:
-    # 매주 월요일 01:00 KST (UTC 16:00 일요일)
-    - cron: '0 16 * * 1'
+  workflow_dispatch: {}         # 수동 실행
+  schedule:                     # 매주 월요일 01:00 KST (UTC 일요일 16:00)
+    - cron: "0 16 * * 0"
 
 jobs:
   shard:
@@ -20,17 +19,18 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install yfinance pandas numpy
 
-      - name: Prepare tickers
+      - name: Prepare workspace (CLEAN)
         run: |
-          mkdir -p data artifacts
-          # 예시용 티커 파일(있으면 건너뜀)
+          rm -rf artifacts
+          mkdir -p artifacts
+          mkdir -p data
           if [ ! -f data/nasdaq_tickers.csv ]; then
             echo "ticker" > data/nasdaq_tickers.csv
             printf "AAPL\nMSFT\nGOOGL\n" >> data/nasdaq_tickers.csv
@@ -42,8 +42,7 @@ jobs:
             --tickers_csv data/nasdaq_tickers.csv \
             --shard_idx ${{ matrix.shard_idx }} \
             --num_shards 8 \
-            --out_csv artifacts/shard_${{ matrix.shard_idx }}.csv \
-            --resume
+            --out_csv artifacts/shard_${{ matrix.shard_idx }}.csv
 
       - name: Upload shard artifact
         uses: actions/upload-artifact@v4
@@ -62,7 +61,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install deps
         run: |
@@ -87,9 +86,8 @@ jobs:
             --input_dir artifacts \
             --out_all all_nasdaq_value_screen.csv
 
-      - name: Upload final CSVs
+      - name: Upload final CSV
         uses: actions/upload-artifact@v4
         with:
           name: yf-ultra-v2-results
-          path: |
-            all_nasdaq_value_screen.csv
+          path: all_nasdaq_value_screen.csv
