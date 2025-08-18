@@ -162,6 +162,9 @@ def compute_snapshots_for_ticker(ticker: str):
                     shares = fi.get("shares", np.nan)
             except Exception:
                 pass
+                
+        sector  = info.get("sector") or np.nan
+        industry = info.get("industry") or info.get("industryDisp") or np.nan
 
         snaps = {}
         ttm = build_ttm_snapshots(tkr)
