@@ -1,0 +1,30 @@
+name: Update Nasdaq Tickers
+
+on:
+  workflow_dispatch:   # 수동 실행
+  schedule:
+    - cron: "30 15 * * 0"
+
+jobs:
+  update-tickers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Download nasdaq tickers
+        run: |
+          mkdir -p data
+          curl -sSL https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt \
+            | tail -n +2 \
+            | grep -v "File Creation Time" \
+            | cut -d"|" -f1 \
+            > data/nasdaq_tickers.csv
+
+      - name: Commit & push updated tickers
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data/nasdaq_tickers.csv
+          git commit -m "chore: update nasdaq tickers [skip ci]" || echo "No changes"
+          git push
