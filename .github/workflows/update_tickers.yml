@@ -20,11 +20,14 @@ jobs:
       - name: Download nasdaq tickers
         run: |
           mkdir -p data
-          curl -sSL https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt \
-            | tail -n +2 \
-            | grep -v "File Creation Time" \
-            | cut -d"|" -f1 \
-            > data/nasdaq_tickers.csv
+          {
+            echo "ticker"            # ✅ 헤더 추가
+            curl -sSL https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt \
+              | tail -n +2 \
+              | grep -v "File Creation Time" \
+              | cut -d"|" -f1
+          } > data/nasdaq_tickers.csv
+
 
       - name: Commit & push updated tickers
         run: |
