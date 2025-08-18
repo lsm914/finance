@@ -5,6 +5,8 @@ import os, glob, argparse
 import pandas as pd
 import numpy as np
 
+
+
 def get_series(df: pd.DataFrame, col: str) -> pd.Series:
     if col not in df.columns:
         return pd.Series(np.nan, index=df.index)
@@ -38,6 +40,11 @@ def main():
     args = ap.parse_args()
 
     df = load_all_csv(args.input_dir)
+    
+    # 🔒 안전 필터: 혹시 섞여 들어온 y3/2_3y 컬럼은 제거
+    drop_pat = df.columns.str.contains(r'(_y3$)|(_chg_2_3y$)')
+    if drop_pat.any():
+        df = df.loc[:, ~drop_pat]
 
     # 1) 저평가 지수
     uv = safe_mean([
