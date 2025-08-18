@@ -12,6 +12,7 @@ jobs:
       matrix:
         shard_idx: [0,1,2,3,4,5,6,7]
       fail-fast: false
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,9 +27,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install yfinance pandas numpy
 
-      - name: Prepare workspace (CLEAN)
+      # 🔥 과거 산출물/잔여물 전부 제거 (클린 스타트)
+      - name: Clean workspace
         run: |
           rm -rf artifacts
+          rm -rf artifacts_flat
           mkdir -p artifacts
           mkdir -p data
           if [ ! -f data/nasdaq_tickers.csv ]; then
@@ -54,6 +57,7 @@ jobs:
   merge:
     runs-on: ubuntu-latest
     needs: shard
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,6 +72,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy
 
+      # 🔥 이전 다운로드/산출물 폴더 삭제 (이번 런의 아티팩트만 사용)
+      - name: Clean artifacts dir
+        run: |
+          rm -rf artifacts
+          mkdir -p artifacts
+
+      # 이번 런의 shard-* 아티팩트만 평탄화하여 다운로드
       - name: Download all shard artifacts (flatten)
         uses: actions/download-artifact@v4
         with:
@@ -77,9 +88,10 @@ jobs:
 
       - name: List merged artifacts
         run: |
-          echo "=== artifacts ==="
+          echo "=== artifacts (should be only this run) ==="
           ls -al artifacts
 
+      # ✅ 이번 런에서 받은 아티팩트만 읽도록 --input_dir=artifacts 지정
       - name: Merge shards & compute indices
         run: |
           python merge_shards.py \
