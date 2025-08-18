@@ -29,26 +29,35 @@ Merge shards & compute indices (v2)
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 import os, glob, argparse
 import pandas as pd
 import numpy as np
 
-def pct_rank(s: pd.Series, invert=False):
-    s = s.astype(float)
-    r = s.rank(pct=True, method='max')
+# ---- 안전 헬퍼들 ----
+def get_series(df: pd.DataFrame, col: str) -> pd.Series:
+    """컬럼이 없으면 길이 맞는 NaN Series 반환, 있으면 숫자형으로 정규화"""
+    if col not in df.columns:
+        return pd.Series(np.nan, index=df.index)
+    return pd.to_numeric(df[col], errors='coerce')
+
+def pctrank_col(df: pd.DataFrame, col: str, invert: bool=False) -> pd.Series:
+    s = get_series(df, col)
+    r = s.rank(pct=True, method='max')  # NaN은 그대로 유지
     return (1 - r) if invert else r
 
 def safe_mean(series_list):
     cols = [s for s in series_list if isinstance(s, pd.Series)]
-    if not cols: return None
-    df = pd.concat(cols, axis=1)
-    return df.mean(axis=1)
+    if not cols:
+        return pd.Series(np.nan)
+    return pd.concat(cols, axis=1).mean(axis=1)  # NaN 자동 제외 평균
 
-def to_100(x):
+def to_100(x: pd.Series) -> pd.Series:
     return (x*100).clip(lower=0, upper=100)
 
 def load_all_csv(input_dir: str) -> pd.DataFrame:
-    # 하위 폴더까지 재귀로 모든 shard_*.csv 수집
     paths = sorted(glob.glob(os.path.join(input_dir, "**", "shard_*.csv"), recursive=True))
     if not paths:
         raise SystemExit(f"No shard csvs found under: {input_dir}")
@@ -65,19 +74,19 @@ def main():
 
     # ===== 저평가 지수 =====
     uv = safe_mean([
-        pct_rank(df.get('PE_TTM_now'), invert=True),
-        pct_rank(df.get('PB_TTM_now'), invert=True),
-        pct_rank(df.get('EV_EBITDA_TTM_now'), invert=True),
-        pct_rank(df.get('FCF_Yield_now')),
+        pctrank_col(df, 'PE_TTM_now', invert=True),
+        pctrank_col(df, 'PB_TTM_now', invert=True),
+        pctrank_col(df, 'EV_EBITDA_TTM_now', invert=True),
+        pctrank_col(df, 'FCF_Yield_now', invert=False),
     ])
     df['UndervaluationIndex'] = to_100(uv)
 
     # ===== 성장 지수 =====
     w0, w1, w2 = 0.5, 0.3, 0.2
-    def gtrip(prefix):
-        a = pct_rank(df.get(f'{prefix}_chg_0_1y'))
-        b = pct_rank(df.get(f'{prefix}_chg_1_2y'))
-        c = pct_rank(df.get(f'{prefix}_chg_2_3y'))
+    def gtrip(prefix: str) -> pd.Series:
+        a = pctrank_col(df, f'{prefix}_chg_0_1y')
+        b = pctrank_col(df, f'{prefix}_chg_1_2y')
+        c = pctrank_col(df, f'{prefix}_chg_2_3y')
         return a*w0 + b*w1 + c*w2
 
     g_price   = gtrip('price')
@@ -86,24 +95,21 @@ def main():
     df['GrowthIndex'] = to_100(safe_mean([g_price, g_mcap, g_ebitda]))
 
     # ===== 현금 안정성 지수 =====
-    a_level = pct_rank(df.get('FCF_Yield_now'))  # 높을수록 좋음
-    pos_ratio = (
-        (df.get('FCF_TTM_chg_0_1y')>0).astype(int) +
-        (df.get('FCF_TTM_chg_1_2y')>0).astype(int) +
-        (df.get('FCF_TTM_chg_2_3y')>0).astype(int)
-    ) / 3.0
+    a_level = pctrank_col(df, 'FCF_Yield_now')  # 높을수록 좋음
 
-    vol = pd.concat([
-        df.get('FCF_TTM_chg_0_1y').abs(),
-        df.get('FCF_TTM_chg_1_2y').abs(),
-        df.get('FCF_TTM_chg_2_3y').abs(),
-    ], axis=1).std(axis=1)
-    vol_pen = pct_rank(vol)  # 높을수록 변동성 큼 → 감점
+    f0 = get_series(df, 'FCF_TTM_chg_0_1y')
+    f1 = get_series(df, 'FCF_TTM_chg_1_2y')
+    f2 = get_series(df, 'FCF_TTM_chg_2_3y')
+
+    # NaN>0 은 False로 처리되므로 일관성 계산 안전
+    pos_ratio = ((f0 > 0).astype(int) + (f1 > 0).astype(int) + (f2 > 0).astype(int)) / 3.0
+
+    vol = pd.concat([f0.abs(), f1.abs(), f2.abs()], axis=1).std(axis=1)
+    vol_pen = vol.rank(pct=True, method='max')  # 높을수록 변동 큼 → 감점
 
     cash_safe = (a_level*0.6 + pos_ratio*0.3 - vol_pen*0.1)
     df['CashSafetyIndex'] = to_100(cash_safe)
 
-    # 선호 정렬
     df = df.sort_values(['UndervaluationIndex', 'CashSafetyIndex', 'GrowthIndex'], ascending=False)
     df.to_csv(args.out_all, index=False)
 
