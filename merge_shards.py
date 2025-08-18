@@ -68,7 +68,7 @@ def main():
     df["GrowthIndex"] = to_100(safe_mean([g_price, g_mcap, g_ebitda]))
 
     # 3) 현금 안정성 지수 (분절 2개)
-    a_level = pctrank_col(df, "FCF_Yield_now")
+    a_level = pctrank_col(df, "FCF_Yield_now").fillna(0)
     f0 = get_series(df, "FCF_TTM_chg_0_1y")
     f1 = get_series(df, "FCF_TTM_chg_1_2y")
 
@@ -77,7 +77,7 @@ def main():
 
     # 변동성 패널티: 두 구간 |변화율|의 표준편차 → 퍼센타일
     vol = pd.concat([f0.abs(), f1.abs()], axis=1).std(axis=1)
-    vol_pen = vol.rank(pct=True, method="max")
+    vol_pen = vol.rank(pct=True, method="max").fillna(0)
 
     cash_safe = (a_level*0.6 + pos_ratio*0.3 - vol_pen*0.1)
     df["CashSafetyIndex"] = to_100(cash_safe)
