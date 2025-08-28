@@ -3,8 +3,9 @@ name: YF Ultra Conservative Screener v2
 on:
   workflow_dispatch: {}
   # 체이닝으로 실행하려면 아래 주석 해제 대신 update 워크플로우에서 workflow_run 사용
-  # schedule:
-  #   - cron: "0 16 * * 0"  # 월 01:00 KST (UTC 일 16:00)
+  schedule:
+    - cron: "0 16 * * 0"   # 예: 월 00:30 KST
+
 
 jobs:
   shard:
